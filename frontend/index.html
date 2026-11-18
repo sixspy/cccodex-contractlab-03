@@ -11,6 +11,7 @@
   .sheet{max-width:980px;margin:0 auto;padding:28px 22px 48px}
   header{border-bottom:2px solid var(--ink);padding-bottom:14px;margin-bottom:18px;display:flex;justify-content:space-between;gap:16px}
   h1{font-family:Georgia,"Songti SC",serif;font-size:34px;margin:0;letter-spacing:.02em}
+  h3{font-family:Georgia,"Songti SC",serif;font-size:17px;margin:16px 0 8px;padding-bottom:4px;border-bottom:1px dashed var(--line)}
   .lede{margin-top:6px;color:#6b5b4b;max-width:46ch;line-height:1.5}
   .steps{display:flex;gap:0;margin:18px 0 22px;border:1px solid var(--line);background:#fffaf2}
   .steps button{flex:1;border:0;border-right:1px solid var(--line);background:transparent;padding:12px 8px;cursor:pointer;font-weight:500}
@@ -21,7 +22,7 @@
   table{width:100%;border-collapse:collapse;font-size:14px}
   th,td{border-bottom:1px solid var(--line);padding:10px 6px;text-align:left;vertical-align:top}
   th{font-size:12px;text-transform:none;color:#6b5b4b}
-  input{width:100%;border:1px solid var(--line);background:#fff;padding:9px 10px;margin:6px 0 12px;border-radius:2px}
+  input,select{width:100%;border:1px solid var(--line);background:#fff;padding:9px 10px;margin:6px 0 12px;border-radius:2px}
   .primary{background:var(--accent);color:#fff;border:0;padding:10px 14px;cursor:pointer}
   .ghost{background:transparent;border:1px solid var(--ink);padding:7px 10px;cursor:pointer}
   .login{max-width:420px;margin:14vh auto;background:#fffaf2;border:1px solid var(--line);padding:28px}
@@ -53,8 +54,10 @@ createApp({
     const user=ref(localStorage.getItem('contractlab_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
     const contracts=ref([]), batches=ref([]), buffers=ref([]), recon=ref({});
+    const board=ref({ingress:[],buffers:[],reconcile:{},policy:[],pending:[],events:[],rulebook:null});
+    const pendingPath=ref('甲'), pathMsg=ref('');
     const form=ref({subject:'订单入站', payload_fields:'order_id,amount'});
-    const nav=['契约版本','入站校验','双写缓冲','契约对账'];
+    const nav=['契约版本','入站校验','兼容页序丙'];
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
       err.value='';
@@ -81,20 +84,35 @@ createApp({
       buffers.value=Array.isArray(u.items)?u.items:[];
       const q=await loadJson('/api/reconcile'); if(q===null) return;
       recon.value=q&&typeof q==='object'?q:{};
+      const bd=await loadJson('/api/compat/board'); if(bd===null) return;
+      board.value=bd&&typeof bd==='object'?bd:{ingress:[],buffers:[],reconcile:{},policy:[],pending:[],events:[],rulebook:null};
     }
     async function validate(){
       actionErr.value='';
       const r=await fetch('/api/ingress/validate',{method:'POST',headers:auth(),body:JSON.stringify(form.value)});
-      const j=await r.json(); actionErr.value=r.ok?('校验结果：'+j.result+(j.missing?('；缺 '+j.missing.join(',')):'')):(j.detail||'失败');
+      const j=await r.json();
+      actionErr.value=r.ok?(j.result==='缓冲'
+        ?('校验结果：缓冲（'+(j.write_path||'—')+'路径；批次 #'+j.batch_id+(j.pending_id?('；候审 #'+j.pending_id):'')+(j.missing&&j.missing.length?('；缺 '+j.missing.join(',')):'')+'）')
+        :('校验结果：'+j.result+(j.batch_id?('；批次 #'+j.batch_id):'')+(j.missing&&j.missing.length?('；缺 '+j.missing.join(',')):'')))
+        :(j.detail||'失败');
+      await refresh();
+    }
+    async function choosePath(){
+      pathMsg.value='';
+      const r=await fetch('/api/compat/rulebook',{method:'POST',headers:auth(),body:JSON.stringify({path:pendingPath.value})});
+      const j=await r.json().catch(()=>({}));
+      pathMsg.value=r.ok?('规则簿：'+j.current.path+' 路径（'+j.current.selected_on+' 选定）'):(j.detail||'失败');
       await refresh();
     }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,contracts,batches,buffers,recon,form,actionErr,login,logout,validate};
+    return {token,user,username,password,err,tab,nav,contracts,batches,buffers,recon,form,actionErr,
+            board,pendingPath,pathMsg,login,logout,validate,choosePath};
   },
   template:`
   <div v-if="!token" class="login">
     <h1>入站契约</h1>
     <p class="lede">按启用正式契约校验入站字段；缺字段按严格模式拒收或兼容模式进缓冲。</p>
+    <p class="lede">兼容模式为双写：批次与缓冲行同成同败，甲/乙路径由当天兼容规则簿选定。</p>
     <label>用户名</label><input v-model="username"/><label>密码</label><input type="password" v-model="password"/>
     <div class="err">{{err}}</div><button class="primary" @click="login">打开契约簿</button>
   </div>
@@ -124,22 +142,57 @@ createApp({
       </div>
       <div class="card">
         <h2>最近批次</h2>
-        <table><thead><tr><th>批次</th><th>结果</th><th>说明</th></tr></thead>
+        <table><thead><tr><th>批次</th><th>结果</th><th>支</th><th>说明</th></tr></thead>
         <tbody><tr v-for="b in (batches||[]).slice(0,8)" :key="b.id">
           <td>#{{b.id}} {{b.subject}}</td>
           <td><span class="stamp" :class="{bad:b.result!=='通过'}">{{b.result}}</span></td>
+          <td>{{b.write_path||'—'}}<span v-if="b.draft"> 草稿</span></td>
           <td>{{b.detail}}</td>
         </tr></tbody></table>
       </div>
     </div>
     <div class="card" v-show="tab===2">
-      <h2>双写缓冲</h2>
-      <table><thead><tr><th>缓冲</th><th>批次</th><th>主题</th><th>原因</th></tr></thead>
-      <tbody><tr v-for="b in buffers" :key="b.id"><td>{{b.id}}</td><td>{{b.batch_id}}</td><td>{{b.subject}}</td><td>{{b.reason}}</td></tr></tbody></table>
-    </div>
-    <div class="card" v-show="tab===3">
-      <h2>契约对账摘要</h2>
-      <p>入站 {{recon.ingress_total}} · 通过 {{recon.passed}} · 缓冲 {{recon.buffered}} · 拒收 {{recon.rejected}} · 缓冲行 {{recon.buffer_rows}} · 对齐 {{recon.aligned}}</p>
+      <h2>兼容页序丙 · 双写边界</h2>
+      <p class="meta">当天选定后不得更换；甲＝标缓冲与缓冲行同一事务整笔回滚，乙＝草稿确认后原子挂行且草稿不得标通过。</p>
+      <p>现行规则簿：<strong>{{board.rulebook?board.rulebook.path:'未选定'}}</strong>
+         <span class="meta" v-if="board.rulebook">（{{board.rulebook.selected_on}} 选定 · {{board.rulebook.note}}）</span></p>
+      <select v-model="pendingPath"><option value="甲">甲路径 · 同事务整笔</option><option value="乙">乙路径 · 草稿确认后挂行</option></select>
+      <button class="ghost" style="margin-left:8px" @click="choosePath">写入兼容规则簿</button>
+      <div class="err">{{pathMsg}}</div>
+      <h3>对账账册</h3>
+      <p>入站 {{board.reconcile.ingress_total}} · 通过 {{board.reconcile.passed}} · 缓冲 {{board.reconcile.buffered}} · 拒收 {{board.reconcile.rejected}} · 缓冲行 {{board.reconcile.buffer_rows}} · 草稿 {{board.reconcile.draft_open}} · 候审 {{board.reconcile.pending_open}}</p>
+      <p>无行缓冲 {{board.reconcile.unbacked_buffered}} · 悬空缓冲行 {{board.reconcile.orphan_buffer_rows}} · 重复缓冲行 {{board.reconcile.duplicate_buffer_rows}} · 混支 {{board.reconcile.mixed_branch}} · 缺候审 {{board.reconcile.pending_missing}} · 违例 {{board.reconcile.violations}}</p>
+      <p>对齐：<span class="stamp" :class="{bad:!board.reconcile.aligned}">{{board.reconcile.aligned}}</span>
+         <span class="meta">（规则簿 {{board.reconcile.rulebook_path||'未选定'}} · {{board.reconcile.rulebook_day||'—'}}）</span></p>
+      <div class="pair">
+        <div>
+          <h3>入站列表</h3>
+          <table><thead><tr><th>批次</th><th>结果</th><th>支</th></tr></thead>
+          <tbody><tr v-for="i in (board.ingress||[]).slice(0,10)" :key="i.id"><td>#{{i.id}} {{i.subject}}</td><td>{{i.result}}</td><td>{{i.write_path||'—'}}<span v-if="i.draft"> 草稿</span></td></tr></tbody></table>
+          <p class="meta" v-if="!(board.ingress||[]).length">入站列表空。</p>
+        </div>
+        <div>
+          <h3>缓冲队列</h3>
+          <table><thead><tr><th>缓冲行</th><th>批次</th><th>批次结果</th><th>支</th><th>原因</th></tr></thead>
+          <tbody><tr v-for="q in (board.buffers||[])" :key="q.id">
+            <td>{{q.id}}</td><td>#{{q.batch_id}}</td>
+            <td><span class="stamp" :class="{bad:q.batch_result!=='缓冲'}">{{q.batch_result}}</span></td>
+            <td>{{q.write_path||'—'}}<span v-if="q.draft"> 草稿</span></td><td>{{q.reason}}</td>
+          </tr></tbody></table>
+          <p class="meta" v-if="!(board.buffers||[]).length">缓冲队列空。</p>
+        </div>
+      </div>
+      <h3>候审卡片</h3>
+      <table><thead><tr><th>候审</th><th>批次</th><th>主题</th><th>缺字段</th><th>状态</th></tr></thead>
+      <tbody><tr v-for="p in (board.pending||[])" :key="p.id"><td>{{p.id}}</td><td>#{{p.batch_id}}</td><td>{{p.subject}}</td><td>{{p.missing||'—'}}</td><td>{{p.status}}</td></tr></tbody></table>
+      <p class="meta" v-if="!(board.pending||[]).length">无候审卡片。</p>
+      <h3>策略附页</h3>
+      <table><thead><tr><th>章节</th><th>条目</th><th>说明</th></tr></thead>
+      <tbody><tr v-for="p in (board.policy||[])" :key="p.id"><td>{{p.section}}</td><td>{{p.title}}</td><td>{{p.body}}</td></tr></tbody></table>
+      <h3>兼容事件（争用 / 偏了）</h3>
+      <table><thead><tr><th>类别</th><th>主题</th><th>说明</th><th>时间</th></tr></thead>
+      <tbody><tr v-for="e in (board.events||[])" :key="e.id"><td>{{e.kind}}</td><td>{{e.subject||'—'}}</td><td>{{e.detail}}</td><td>{{e.created_at}}</td></tr></tbody></table>
+      <p class="meta" v-if="!(board.events||[]).length">无兼容事件。</p>
     </div>
   </div>`
 }).mount('#app');
